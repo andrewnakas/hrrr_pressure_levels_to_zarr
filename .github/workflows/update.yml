@@ -1,0 +1,127 @@
+name: Update HRRR Zarr
+
+on:
+  schedule:
+    - cron: '15 */6 * * *'  # Every 6 hours at :15 past the hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GIT_LFS_SKIP_SMUDGE: 1
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+          # Remove large unnecessary packages (~40GB freed)
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force
+          sudo apt-get clean
+          # Remove apt caches
+          sudo apt-get autoremove -y
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "After cleanup:"
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes0 libeccodes-dev git-lfs
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure capture window
+        run: |
+          # HRRR forecast hours: 0-48 hourly
+          FH=$(python - <<'PY'
+          # 0 to 48 hours, hourly
+          hours = list(range(0, 49))
+          print(' '.join(str(x) for x in hours))
+          PY
+          )
+          echo "FORECAST_HOURS=${FORECAST_HOURS:-$FH}" >> $GITHUB_ENV
+          echo "PARAM_SHORTNAMES=${PARAM_SHORTNAMES:-}" >> $GITHUB_ENV
+          echo "LEVELS_HPA=${LEVELS_HPA:-}" >> $GITHUB_ENV
+          echo "MAX_ZARR_BYTES=${MAX_ZARR_BYTES:-1900000000}" >> $GITHUB_ENV
+          echo "DTYPE=${DTYPE:-float16}" >> $GITHUB_ENV
+
+      - name: Prepare data worktree
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create fresh data branch - don't fetch old data to save disk space
+          if git ls-remote --exit-code origin data >/dev/null 2>&1; then
+            # Data branch exists - create orphan branch to discard history
+            git worktree add --detach ../data-worktree
+            cd ../data-worktree
+            git checkout --orphan data
+            git rm -rf . 2>/dev/null || true
+          else
+            # First time - create new branch
+            git worktree add -b data ../data-worktree
+            cd ../data-worktree
+          fi
+
+          # Clean everything except .git
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+
+          git lfs install --skip-smudge
+          # Re-add LFS tracking for large artifacts
+          if [ -f ../hrrr_pressure_levels_to_zarr/.gitattributes ]; then
+            cp ../hrrr_pressure_levels_to_zarr/.gitattributes .
+          fi
+          git lfs track "*.zarr.zip"
+          git add .gitattributes
+
+          echo "Data worktree ready:"
+          df -h
+
+      - name: Generate Zarr archive
+        run: |
+          echo "Disk before processing:"
+          df -h
+          python scripts/update_hrrr_zarr.py --output ../data-worktree/hrrr_latest.zarr --zip
+          # Clean up GRIB downloads and unzipped zarr immediately
+          rm -rf /tmp/hrrr
+          rm -rf ../data-worktree/hrrr_latest.zarr
+          # Additional cleanup of Python caches
+          find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+          find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+          pip cache purge || true
+          echo "Disk after Zarr generation:"
+          df -h
+          echo "Files in data worktree:"
+          ls -lh ../data-worktree
+
+      - name: Commit and push latest data
+        run: |
+          cd ../data-worktree
+          git add .gitattributes hrrr_latest.zarr.zip latest_metadata.json
+          git status --short
+          git commit -m "Update HRRR pressure levels $(date -u +'%Y-%m-%d %H:%M UTC')" || echo "No changes to commit"
+          git push --force origin HEAD:data

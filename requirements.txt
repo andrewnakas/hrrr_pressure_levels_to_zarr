@@ -1,0 +1,6 @@
+xarray>=2024.6.0
+cfgrib>=0.9.12.0
+zarr>=2.17.0
+numcodecs>=0.12.0
+dask[array]>=2024.6.0
+requests>=2.32.0
