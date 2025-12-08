@@ -203,9 +203,11 @@ def save_zarr(ds: xr.Dataset, output_path: Path, zip_output: bool, max_bytes: in
             root_dir=output_path.parent,
             base_dir=output_path.name,
         )
+        size_mb = archive_path.stat().st_size / 1e6
+        LOGGER.info("Zarr archive size: %.1f MB", size_mb)
         if max_bytes and archive_path.stat().st_size > max_bytes:
             raise ValueError(
-                f"Zarr archive {archive_path.stat().st_size/1e6:.1f} MB exceeds max_bytes={max_bytes/1e6:.1f} MB"
+                f"Zarr archive {size_mb:.1f} MB exceeds max_bytes={max_bytes/1e6:.1f} MB"
             )
         return archive_path
     else:
@@ -288,7 +290,7 @@ def main(argv: List[str] | None = None) -> int:
         "--max-bytes",
         dest="max_bytes",
         type=int,
-        default=int(os.getenv("MAX_ZARR_BYTES", 1_900_000_000)),
+        default=int(os.getenv("MAX_ZARR_BYTES", 4_500_000_000)),
         help="Abort if zipped store exceeds this many bytes (prevents GitHub/LFS failures)",
     )
     parser.add_argument(
