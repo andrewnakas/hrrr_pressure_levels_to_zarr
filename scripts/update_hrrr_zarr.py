@@ -317,14 +317,32 @@ def main(argv: List[str] | None = None) -> int:
         LOGGER.info("Trying cycle %s %02dZ", cycle_date.isoformat(), cycle_hour)
         try:
             datasets = []
+            successful_hours = []
             for fh in forecast_hours:
                 url = build_url(args.base_url, cycle_date, cycle_hour, fh)
                 grib_path = tmp_dir / Path(url).name
-                download_file(url, grib_path)
-                datasets.append(load_pressure_dataset(grib_path, shortnames, levels))
-                # Delete GRIB immediately after loading to save disk space
-                grib_path.unlink(missing_ok=True)
-                LOGGER.info("Processed and deleted %s", grib_path.name)
+                try:
+                    download_file(url, grib_path)
+                    datasets.append(load_pressure_dataset(grib_path, shortnames, levels))
+                    successful_hours.append(fh)
+                    # Delete GRIB immediately after loading to save disk space
+                    grib_path.unlink(missing_ok=True)
+                    LOGGER.info("Processed and deleted %s", grib_path.name)
+                except FileNotFoundError:
+                    LOGGER.warning("Forecast hour %d not yet available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
+                    # If we have at least 24 hours of data, that's good enough
+                    if len(successful_hours) >= 24:
+                        LOGGER.info("Proceeding with %d available forecast hours", len(successful_hours))
+                        break
+                    # If this is early in the forecast (< 6 hours), the cycle isn't ready yet
+                    if fh < 6:
+                        raise FileNotFoundError(f"Cycle {cycle_date} {cycle_hour:02d}Z not ready yet")
+                    # Otherwise, proceed with partial data
+                    LOGGER.info("Proceeding with %d available forecast hours", len(successful_hours))
+                    break
+
+            if not datasets:
+                raise FileNotFoundError(f"No data available for cycle {cycle_date} {cycle_hour:02d}Z")
 
             combined = xr.concat(datasets, dim="step", combine_attrs="drop_conflicts")
             if args.dtype:
@@ -339,7 +357,7 @@ def main(argv: List[str] | None = None) -> int:
                 metadata_path,
                 cycle_date=cycle_date,
                 cycle_hour=cycle_hour,
-                forecast_hours=forecast_hours,
+                forecast_hours=successful_hours,
                 source_url=args.base_url,
             )
 
