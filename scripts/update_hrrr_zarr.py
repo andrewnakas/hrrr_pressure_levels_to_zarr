@@ -348,9 +348,11 @@ def main(argv: List[str] | None = None) -> int:
             if args.dtype:
                 combined = combined.astype(args.dtype)
             output_path = Path(args.output)
+            LOGGER.info("Starting Zarr save with %d forecast hours", len(successful_hours))
             archive_path = save_zarr(
                 combined, output_path, zip_output=args.zip_output, max_bytes=args.max_bytes
             )
+            LOGGER.info("Zarr save completed successfully")
 
             metadata_path = output_path.parent / "latest_metadata.json"
             write_metadata(
