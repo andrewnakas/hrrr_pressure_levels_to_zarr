@@ -191,7 +191,12 @@ def save_zarr(ds: xr.Dataset, output_path: Path, zip_output: bool, max_bytes: in
     compressor = Blosc(cname="zstd", clevel=4, shuffle=2)
     encoding = {name: {"compressors": compressor, "dtype": ds[name].dtype} for name in ds.data_vars}
     LOGGER.info("Writing Zarr → %s", output_path)
-    ds.to_zarr(output_path, mode="w", consolidated=True, encoding=encoding)
+    try:
+        ds.to_zarr(output_path, mode="w", consolidated=True, encoding=encoding)
+        LOGGER.info("Zarr write completed")
+    except Exception as e:
+        LOGGER.error("Zarr write failed: %s", e)
+        raise
     if zip_output:
         archive_path = output_path.with_suffix(output_path.suffix + ".zip")
         if archive_path.exists():
@@ -348,6 +353,12 @@ def main(argv: List[str] | None = None) -> int:
             if args.dtype:
                 combined = combined.astype(args.dtype)
             output_path = Path(args.output)
+
+            # Check disk space before write
+            import subprocess
+            df_result = subprocess.run(["df", "-h", str(output_path.parent)], capture_output=True, text=True)
+            LOGGER.info("Disk space before Zarr save:\n%s", df_result.stdout)
+
             LOGGER.info("Starting Zarr save with %d forecast hours", len(successful_hours))
             archive_path = save_zarr(
                 combined, output_path, zip_output=args.zip_output, max_bytes=args.max_bytes
