@@ -19,6 +19,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import xarray as xr
@@ -56,8 +57,8 @@ def parse_levels(text: str | None) -> List[int]:
 
 
 def default_forecast_string() -> str:
-    """HRRR provides hourly forecasts from 0 to 48 hours."""
-    return " ".join(str(h) for h in range(0, 49))
+    """HRRR provides hourly forecasts from 0 to 48 hours. Using 0-36 to fit in time constraints."""
+    return " ".join(str(h) for h in range(0, 37))
 
 
 def cycle_candidates(now: datetime, max_back_cycles: int) -> Iterable[Tuple[datetime.date, int]]:
@@ -241,7 +242,7 @@ def main(argv: List[str] | None = None) -> int:
         "--forecast-hours",
         dest="forecast_hours",
         default=os.getenv("FORECAST_HOURS", default_forecast_string()),
-        help="Space separated forecast hours (0-48 for HRRR)",
+        help="Space separated forecast hours (0-36 default, up to 48 available)",
     )
     parser.add_argument(
         "--cycle-offset",
@@ -318,36 +319,52 @@ def main(argv: List[str] | None = None) -> int:
     tmp_dir = Path(args.tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
+    def download_and_process(fh: int, cycle_date, cycle_hour: int) -> tuple:
+        """Download and process a single forecast hour. Returns (fh, dataset) or (fh, None) on error."""
+        url = build_url(args.base_url, cycle_date, cycle_hour, fh)
+        grib_path = tmp_dir / Path(url).name
+        try:
+            download_file(url, grib_path)
+            ds = load_pressure_dataset(grib_path, shortnames, levels)
+            grib_path.unlink(missing_ok=True)
+            LOGGER.info("Processed and deleted %s", grib_path.name)
+            return (fh, ds)
+        except FileNotFoundError:
+            return (fh, None)
+        except Exception as e:
+            LOGGER.warning("Failed to process forecast hour %d: %s", fh, e)
+            return (fh, None)
+
     for cycle_date, cycle_hour in candidates:
         LOGGER.info("Trying cycle %s %02dZ", cycle_date.isoformat(), cycle_hour)
         try:
-            datasets = []
-            successful_hours = []
-            for fh in forecast_hours:
-                url = build_url(args.base_url, cycle_date, cycle_hour, fh)
-                grib_path = tmp_dir / Path(url).name
-                try:
-                    download_file(url, grib_path)
-                    datasets.append(load_pressure_dataset(grib_path, shortnames, levels))
-                    successful_hours.append(fh)
-                    # Delete GRIB immediately after loading to save disk space
-                    grib_path.unlink(missing_ok=True)
-                    LOGGER.info("Processed and deleted %s", grib_path.name)
-                except FileNotFoundError:
-                    LOGGER.warning("Forecast hour %d not yet available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
-                    # If we have at least 24 hours of data, that's good enough
-                    if len(successful_hours) >= 24:
-                        LOGGER.info("Proceeding with %d available forecast hours", len(successful_hours))
-                        break
-                    # If this is early in the forecast (< 6 hours), the cycle isn't ready yet
-                    if fh < 6:
-                        raise FileNotFoundError(f"Cycle {cycle_date} {cycle_hour:02d}Z not ready yet")
-                    # Otherwise, proceed with partial data
-                    LOGGER.info("Proceeding with %d available forecast hours", len(successful_hours))
-                    break
+            # Download and process forecast hours in parallel (max 8 workers to avoid overwhelming server)
+            datasets_dict = {}
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(download_and_process, fh, cycle_date, cycle_hour): fh for fh in forecast_hours}
+                for future in as_completed(futures):
+                    fh, ds = future.result()
+                    if ds is not None:
+                        datasets_dict[fh] = ds
+                    else:
+                        LOGGER.warning("Forecast hour %d not available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
+                        # If early hours are missing, cycle not ready
+                        if fh < 6 and len(datasets_dict) < 6:
+                            raise FileNotFoundError(f"Cycle {cycle_date} {cycle_hour:02d}Z not ready yet")
 
-            if not datasets:
+            if not datasets_dict:
                 raise FileNotFoundError(f"No data available for cycle {cycle_date} {cycle_hour:02d}Z")
+
+            # If we have less than 24 hours and early hours are missing, try next cycle
+            if len(datasets_dict) < 24:
+                missing_early = any(fh < 12 for fh in forecast_hours[:12] if fh not in datasets_dict)
+                if missing_early:
+                    raise FileNotFoundError(f"Insufficient early forecast hours for cycle {cycle_date} {cycle_hour:02d}Z")
+
+            # Sort datasets by forecast hour
+            successful_hours = sorted(datasets_dict.keys())
+            datasets = [datasets_dict[fh] for fh in successful_hours]
+            LOGGER.info("Successfully retrieved %d forecast hours: %s", len(successful_hours), successful_hours)
 
             combined = xr.concat(datasets, dim="step", combine_attrs="drop_conflicts")
             if args.dtype:
