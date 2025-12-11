@@ -19,7 +19,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import xarray as xr
@@ -84,11 +83,11 @@ def build_url(base_url: str, date, cycle_hour: int, forecast_hour: int) -> str:
     return f"{base_url.rstrip('/')}/{path}/{filename}"
 
 
-def download_file(url: str, dest: Path, retries: int = 3) -> None:
+def download_file(url: str, dest: Path, retries: int = 2) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(1, retries + 1):
         try:
-            with requests.get(url, stream=True, timeout=60) as resp:
+            with requests.get(url, stream=True, timeout=30) as resp:
                 if resp.status_code == 404:
                     raise FileNotFoundError(url)
                 resp.raise_for_status()
@@ -100,7 +99,7 @@ def download_file(url: str, dest: Path, retries: int = 3) -> None:
         except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as exc:
             if attempt == retries:
                 raise
-            sleep_for = attempt * 5
+            sleep_for = 2
             LOGGER.warning("%s (attempt %s/%s), retrying in %ss", exc, attempt, retries, sleep_for)
             import time
 
@@ -338,22 +337,25 @@ def main(argv: List[str] | None = None) -> int:
     for cycle_date, cycle_hour in candidates:
         LOGGER.info("Trying cycle %s %02dZ", cycle_date.isoformat(), cycle_hour)
         try:
-            # Download and process forecast hours in parallel (max 3 workers to conserve memory)
+            # Download and process forecast hours sequentially (avoids deadlocks and hangs)
             datasets_dict = {}
             grib_files = []
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {executor.submit(download_and_process, fh, cycle_date, cycle_hour): fh for fh in forecast_hours}
-                for future in as_completed(futures):
-                    fh, ds, grib_path = future.result()
-                    if ds is not None:
-                        datasets_dict[fh] = ds
-                        if grib_path:
-                            grib_files.append(grib_path)
-                    else:
-                        LOGGER.warning("Forecast hour %d not available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
-                        # If early hours are missing, cycle not ready
-                        if fh < 6 and len(datasets_dict) < 6:
-                            raise FileNotFoundError(f"Cycle {cycle_date} {cycle_hour:02d}Z not ready yet")
+            for i, fh in enumerate(forecast_hours):
+                LOGGER.info("Processing forecast hour %d/%d (f%02d)", i+1, len(forecast_hours), fh)
+                fh, ds, grib_path = download_and_process(fh, cycle_date, cycle_hour)
+                if ds is not None:
+                    datasets_dict[fh] = ds
+                    if grib_path:
+                        grib_files.append(grib_path)
+                else:
+                    LOGGER.warning("Forecast hour %d not available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
+                    # If early hours are missing, cycle not ready
+                    if fh < 6 and len(datasets_dict) < 6:
+                        raise FileNotFoundError(f"Cycle {cycle_date} {cycle_hour:02d}Z not ready yet")
+                    # If we have at least 24 hours, that's sufficient
+                    if len(datasets_dict) >= 24:
+                        LOGGER.info("Stopping at %d forecast hours (sufficient data)", len(datasets_dict))
+                        break
 
             if not datasets_dict:
                 raise FileNotFoundError(f"No data available for cycle {cycle_date} {cycle_hour:02d}Z")
