@@ -320,35 +320,35 @@ def main(argv: List[str] | None = None) -> int:
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     def download_and_process(fh: int, cycle_date, cycle_hour: int) -> tuple:
-        """Download and process a single forecast hour. Returns (fh, dataset) or (fh, None) on error."""
+        """Download and process a single forecast hour. Returns (fh, dataset, grib_path) or (fh, None, None) on error."""
         url = build_url(args.base_url, cycle_date, cycle_hour, fh)
         grib_path = tmp_dir / Path(url).name
         try:
             download_file(url, grib_path)
             ds = load_pressure_dataset(grib_path, shortnames, levels)
-            # CRITICAL: Load data into memory before deleting file
-            # xarray uses lazy loading, so we must compute() to actually read the data
-            ds = ds.compute()
-            grib_path.unlink(missing_ok=True)
-            LOGGER.info("Processed and deleted %s", grib_path.name)
-            return (fh, ds)
+            # Don't delete yet - xarray needs the file during to_zarr()
+            LOGGER.info("Processed %s", grib_path.name)
+            return (fh, ds, grib_path)
         except FileNotFoundError:
-            return (fh, None)
+            return (fh, None, None)
         except Exception as e:
             LOGGER.warning("Failed to process forecast hour %d: %s", fh, e)
-            return (fh, None)
+            return (fh, None, None)
 
     for cycle_date, cycle_hour in candidates:
         LOGGER.info("Trying cycle %s %02dZ", cycle_date.isoformat(), cycle_hour)
         try:
-            # Download and process forecast hours in parallel (max 8 workers to avoid overwhelming server)
+            # Download and process forecast hours in parallel (max 3 workers to conserve memory)
             datasets_dict = {}
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            grib_files = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = {executor.submit(download_and_process, fh, cycle_date, cycle_hour): fh for fh in forecast_hours}
                 for future in as_completed(futures):
-                    fh, ds = future.result()
+                    fh, ds, grib_path = future.result()
                     if ds is not None:
                         datasets_dict[fh] = ds
+                        if grib_path:
+                            grib_files.append(grib_path)
                     else:
                         LOGGER.warning("Forecast hour %d not available for cycle %s %02dZ", fh, cycle_date, cycle_hour)
                         # If early hours are missing, cycle not ready
@@ -384,6 +384,11 @@ def main(argv: List[str] | None = None) -> int:
                 combined, output_path, zip_output=args.zip_output, max_bytes=args.max_bytes
             )
             LOGGER.info("Zarr save completed successfully")
+
+            # Now safe to delete GRIB files - xarray has written everything to Zarr
+            for grib_file in grib_files:
+                grib_file.unlink(missing_ok=True)
+            LOGGER.info("Cleaned up %d GRIB files", len(grib_files))
 
             metadata_path = output_path.parent / "latest_metadata.json"
             write_metadata(
