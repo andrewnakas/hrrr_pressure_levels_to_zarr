@@ -326,6 +326,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             download_file(url, grib_path)
             ds = load_pressure_dataset(grib_path, shortnames, levels)
+            # CRITICAL: Load data into memory before deleting file
+            # xarray uses lazy loading, so we must compute() to actually read the data
+            ds = ds.compute()
             grib_path.unlink(missing_ok=True)
             LOGGER.info("Processed and deleted %s", grib_path.name)
             return (fh, ds)
