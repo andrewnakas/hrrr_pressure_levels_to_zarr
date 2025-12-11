@@ -56,18 +56,20 @@ def parse_levels(text: str | None) -> List[int]:
 
 
 def default_forecast_string() -> str:
-    """HRRR provides hourly forecasts from 0 to 48 hours. Using 0-36 to fit in time constraints."""
-    return " ".join(str(h) for h in range(0, 37))
+    """HRRR 48-hour forecasts available on 00/06/12/18Z cycles."""
+    return " ".join(str(h) for h in range(0, 49))
 
 
 def cycle_candidates(now: datetime, max_back_cycles: int) -> Iterable[Tuple[datetime.date, int]]:
-    """Yield candidate (date, cycle_hour) pairs stepping back 1h at a time.
+    """Yield candidate (date, cycle_hour) pairs stepping back 6h at a time.
 
-    HRRR runs every hour, so we check hourly cycles.
+    HRRR 48-hour forecasts are only available on 00Z, 06Z, 12Z, 18Z cycles.
+    Hourly cycles (01-05Z, 07-11Z, etc.) only have 18-hour forecasts.
     """
     for back in range(max_back_cycles + 1):
-        candidate_time = now - timedelta(hours=back)
-        cycle_hour = candidate_time.hour
+        candidate_time = now - timedelta(hours=6 * back)
+        # Round to nearest 6-hour cycle (00, 06, 12, 18)
+        cycle_hour = (candidate_time.hour // 6) * 6
         yield candidate_time.date(), cycle_hour
 
 
@@ -241,21 +243,21 @@ def main(argv: List[str] | None = None) -> int:
         "--forecast-hours",
         dest="forecast_hours",
         default=os.getenv("FORECAST_HOURS", default_forecast_string()),
-        help="Space separated forecast hours (0-36 default, up to 48 available)",
+        help="Space separated forecast hours (0-48 available on 00/06/12/18Z cycles)",
     )
     parser.add_argument(
         "--cycle-offset",
         dest="cycle_offset",
         type=int,
-        default=int(os.getenv("CYCLE_OFFSET_HOURS", 2)),
+        default=int(os.getenv("CYCLE_OFFSET_HOURS", 5)),
         help="Hours to back off from now(UTC) when picking cycle",
     )
     parser.add_argument(
         "--max-back-cycles",
         dest="max_back_cycles",
         type=int,
-        default=6,
-        help="How many hourly cycles to fall back if newest is missing",
+        default=3,
+        help="How many 6-hour cycles to fall back if newest is missing",
     )
     parser.add_argument(
         "--base-url",

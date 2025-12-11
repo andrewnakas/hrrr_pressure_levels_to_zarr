@@ -56,10 +56,10 @@ jobs:
 
       - name: Configure capture window
         run: |
-          # HRRR forecast hours: 0-36 hourly (reduced to fit in time limit)
+          # HRRR forecast hours: 0-48 hourly (only available on 00/06/12/18Z cycles)
           FH=$(python - <<'PY'
-          # 0 to 36 hours, hourly
-          hours = list(range(0, 37))
+          # 0 to 48 hours, hourly
+          hours = list(range(0, 49))
           print(' '.join(str(x) for x in hours))
           PY
           )
