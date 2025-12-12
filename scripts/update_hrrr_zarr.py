@@ -182,8 +182,10 @@ def load_pressure_dataset(grib_path: Path, shortnames: List[str], levels: Sequen
         ds = ds.sortby("isobaricInhPa")
     if "time" in ds.coords and "step" in ds.coords:
         ds = ds.assign_coords(valid_time=ds.time + ds.step)
-    # Light chunking to keep memory reasonable
-    ds = ds.chunk({"isobaricInhPa": 8, "y": 90, "x": 90})
+
+    # Load all data into memory immediately (no lazy loading, no chunking)
+    # This is MUCH faster than chunking with dask
+    ds = ds.load()
     return ds
 
 
@@ -326,11 +328,9 @@ def main(argv: List[str] | None = None) -> int:
         grib_path = tmp_dir / Path(url).name
         try:
             download_file(url, grib_path)
+            # load_pressure_dataset() now uses .load() internally (eager loading)
             ds = load_pressure_dataset(grib_path, shortnames, levels)
-            # CRITICAL: Load into memory NOW while we only have 1 dataset
-            # This prevents I/O overload when writing 49 lazy datasets to Zarr
-            ds = ds.compute()
-            # Now safe to delete - data is in memory
+            # Data is already in memory, safe to delete GRIB file
             grib_path.unlink(missing_ok=True)
             LOGGER.info("Loaded and deleted %s", grib_path.name)
             return (fh, ds)
