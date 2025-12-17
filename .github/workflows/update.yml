@@ -5,12 +5,18 @@ on:
     - cron: '15 */6 * * *'  # Every 6 hours at :15 past the hour
   workflow_dispatch:
 
+# Prevent concurrent runs - cancel old run if new one starts
+concurrency:
+  group: update-hrrr-zarr
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 hours max (49 files × ~2 min each + overhead)
     env:
       GIT_LFS_SKIP_SMUDGE: 1
     steps:
